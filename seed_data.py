@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from database import SessionLocal, engine, Base
 import models
-from models import PackagingMethod, BatchMarkStatus, ComplaintType
+from models import PackagingMethod, BatchMarkStatus, ComplaintType, ReinspectionStatus
 
 
 def seed_data():
@@ -437,6 +437,33 @@ def seed_data():
         ]
         db.add_all(complaints)
 
+        reinspections = [
+            models.ReinspectionOrder(
+                order_id=orders[6].id,
+                risk_categories="formula,spray_line,climate",
+                formula_risk_score=75.0,
+                spray_line_risk_score=63.0,
+                climate_risk_score=55.0,
+                complaint_risk_score=80.0,
+                total_risk_score=68.0,
+                risk_detail="[配方]配方投诉率100.0%过高(>=30%); [配方]起泡率100.0%严重(>=20%); [喷涂线]喷涂线投诉率100.0%过高(>=25%); [喷涂线]质检不合格批次率100.0%过高(>=50%); [气候]目的港平均高温30.0°C偏高(>=30°C); [气候]平均湿度80.0%偏高(>=75%); [气候]气候区为热带草原气候(热带)",
+                status=ReinspectionStatus.PENDING,
+            ),
+            models.ReinspectionOrder(
+                order_id=orders[3].id,
+                risk_categories="formula,spray_line,climate",
+                formula_risk_score=75.0,
+                spray_line_risk_score=63.0,
+                climate_risk_score=70.0,
+                complaint_risk_score=55.0,
+                total_risk_score=66.25,
+                risk_detail="[配方]配方投诉率100.0%过高(>=30%); [配方]起泡率100.0%严重(>=20%); [喷涂线]喷涂线投诉率100.0%过高(>=25%); [喷涂线]质检不合格批次率100.0%过高(>=50%); [气候]目的港平均高温35.0°C极高(>=35°C); [气候]平均湿度88.0%极高(>=85%); [气候]气候区为热带季风气候(热带)",
+                status=ReinspectionStatus.IN_PROGRESS,
+                assigned_inspector="赵质检",
+            ),
+        ]
+        db.add_all(reinspections)
+
         db.commit()
         print("数据初始化完成！")
         print(f"  - 涂料配方: {len(formulas)} 条")
@@ -447,6 +474,7 @@ def seed_data():
         print(f"  - 质检记录: {len(inspections)} 条")
         print(f"  - 批次标记: {len(marks)} 条")
         print(f"  - 客户投诉: {len(complaints)} 条")
+        print(f"  - 复检派单: {len(reinspections)} 条")
         print()
         print("问题批次提示:")
         print("  B-2025-0910-BAD: 使用国产低价漆 F-BAD-003 + C线(手工/老化线)")

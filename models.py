@@ -28,6 +28,19 @@ class ComplaintType(str, enum.Enum):
     OTHER = "other"
 
 
+class RiskCategory(str, enum.Enum):
+    FORMULA = "formula"
+    SPRAY_LINE = "spray_line"
+    CLIMATE = "climate"
+
+
+class ReinspectionStatus(str, enum.Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
 class CoatingFormula(Base):
     __tablename__ = "coating_formulas"
 
@@ -163,3 +176,24 @@ class CustomerComplaint(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     order = relationship("ExportOrder", back_populates="complaints")
+
+
+class ReinspectionOrder(Base):
+    __tablename__ = "reinspection_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("export_orders.id"), nullable=False)
+    risk_categories = Column(String(200), nullable=False)
+    formula_risk_score = Column(Float, default=0.0)
+    spray_line_risk_score = Column(Float, default=0.0)
+    climate_risk_score = Column(Float, default=0.0)
+    complaint_risk_score = Column(Float, default=0.0)
+    total_risk_score = Column(Float, nullable=False)
+    risk_detail = Column(Text)
+    status = Column(Enum(ReinspectionStatus), default=ReinspectionStatus.PENDING, nullable=False)
+    assigned_inspector = Column(String(100))
+    reinspection_result = Column(Text)
+    completed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    order = relationship("ExportOrder")

@@ -241,3 +241,55 @@ def get_formula_route_trace(
     if result is None:
         raise HTTPException(status_code=404, detail="配方或线路组合不存在")
     return result
+
+
+@app.get("/reinspection/warnings/", response_model=List[schemas.PreDepartureWarningItem])
+def get_pre_departure_warnings(
+    min_risk_score: float = 30.0,
+    db: Session = Depends(get_db)
+):
+    return crud.generate_pre_departure_warnings(db, min_risk_score=min_risk_score)
+
+
+@app.post("/reinspection/generate/", response_model=List[schemas.ReinspectionOrder])
+def generate_reinspection_dispatches(
+    min_risk_score: float = 30.0,
+    db: Session = Depends(get_db)
+):
+    return crud.generate_reinspection_dispatches(db, min_risk_score=min_risk_score)
+
+
+@app.get("/reinspection/orders/", response_model=List[schemas.ReinspectionOrder])
+def list_reinspection_orders(
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+    risk_category: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    return crud.get_reinspections(db, skip=skip, limit=limit, status=status, risk_category=risk_category)
+
+
+@app.get("/reinspection/orders/{reinspection_id}", response_model=schemas.ReinspectionOrderDetail)
+def get_reinspection_order_detail(reinspection_id: int, db: Session = Depends(get_db)):
+    result = crud.get_reinspection_detail(db, reinspection_id=reinspection_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="复检派单不存在")
+    return result
+
+
+@app.patch("/reinspection/orders/{reinspection_id}", response_model=schemas.ReinspectionOrder)
+def update_reinspection_order(
+    reinspection_id: int,
+    update_data: schemas.ReinspectionOrderUpdate,
+    db: Session = Depends(get_db)
+):
+    result = crud.update_reinspection(db, reinspection_id=reinspection_id, update_data=update_data)
+    if result is None:
+        raise HTTPException(status_code=404, detail="复检派单不存在")
+    return result
+
+
+@app.get("/reinspection/dashboard/", response_model=schemas.ReinspectionDashboardStats)
+def get_reinspection_dashboard(db: Session = Depends(get_db)):
+    return crud.get_reinspection_dashboard(db)

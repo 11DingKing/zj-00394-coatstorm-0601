@@ -26,6 +26,19 @@ class ComplaintType(str, enum.Enum):
     OTHER = "other"
 
 
+class RiskCategory(str, enum.Enum):
+    FORMULA = "formula"
+    SPRAY_LINE = "spray_line"
+    CLIMATE = "climate"
+
+
+class ReinspectionStatus(str, enum.Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
 class CoatingFormulaBase(BaseModel):
     code: str
     name: str
@@ -286,3 +299,83 @@ class FormulaRouteRiskDetail(BaseModel):
     avg_high_temp_c: Optional[float] = None
     avg_relative_humidity_pct: Optional[float] = None
     related_batches: List[BatchInspectionSummary]
+
+
+class ReinspectionOrderBase(BaseModel):
+    order_id: int
+    risk_categories: str
+    formula_risk_score: float = 0.0
+    spray_line_risk_score: float = 0.0
+    climate_risk_score: float = 0.0
+    complaint_risk_score: float = 0.0
+    total_risk_score: float
+    risk_detail: Optional[str] = None
+
+
+class ReinspectionOrderCreate(ReinspectionOrderBase):
+    pass
+
+
+class ReinspectionOrderUpdate(BaseModel):
+    status: Optional[ReinspectionStatus] = None
+    assigned_inspector: Optional[str] = None
+    reinspection_result: Optional[str] = None
+
+
+class ReinspectionOrder(ReinspectionOrderBase):
+    id: int
+    status: ReinspectionStatus
+    assigned_inspector: Optional[str] = None
+    reinspection_result: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReinspectionOrderDetail(ReinspectionOrder):
+    order: Optional[ExportOrder] = None
+    batch: Optional[VehicleBatch] = None
+    formula: Optional[CoatingFormula] = None
+    spray_line: Optional[SprayLine] = None
+    climate: Optional[DestinationClimate] = None
+    inspections: List[InspectionRecord] = []
+    marks: List[BatchMark] = []
+    complaints: List[CustomerComplaint] = []
+
+
+class PreDepartureWarningItem(BaseModel):
+    order_id: int
+    order_no: str
+    customer: str
+    shipping_route: str
+    shipment_date: datetime
+    batch_code: str
+    formula_code: str
+    formula_name: str
+    spray_line_code: str
+    spray_line_name: str
+    port_name: str
+    climate_zone: Optional[str] = None
+    avg_high_temp_c: Optional[float] = None
+    avg_relative_humidity_pct: Optional[float] = None
+    formula_risk_score: float
+    spray_line_risk_score: float
+    climate_risk_score: float
+    complaint_risk_score: float
+    total_risk_score: float
+    risk_categories: List[str]
+    risk_detail: str
+
+
+class ReinspectionDashboardStats(BaseModel):
+    total_warnings: int
+    pending_count: int
+    in_progress_count: int
+    completed_count: int
+    cancelled_count: int
+    formula_risk_count: int
+    spray_line_risk_count: int
+    climate_risk_count: int
+    avg_total_risk_score: float
+    high_risk_orders: List[ReinspectionOrder]
