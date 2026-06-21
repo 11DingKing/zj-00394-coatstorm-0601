@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
 import models
 import schemas
+import trace_rules
 from typing import List, Optional
 from datetime import datetime, timedelta
 import json
@@ -180,51 +181,31 @@ def create_complaint(db: Session, complaint: schemas.CustomerComplaintCreate):
 
 
 def trace_by_order(db: Session, order_id: int):
-    order = get_order(db, order_id)
-    if not order:
+    chain = trace_rules.build_order_trace_chain(db, order_id)
+    if not chain:
         return None
 
-    batch = get_batch(db, order.batch_id)
-    formula = get_formula(db, batch.formula_id)
-    spray_line = get_spray_line(db, batch.spray_line_id)
-    climate = get_climate(db, order.climate_id)
-    inspections = get_inspections_by_batch(db, batch.id)
-    marks = get_marks_by_batch(db, batch.id)
-    complaints = get_complaints_by_order(db, order.id)
+    direct_same_batch_orders = trace_rules.get_orders_by_batch(
+        db, chain.batch.id, exclude_order_id=chain.order.id
+    )
 
-    direct_same_batch_orders = db.query(models.ExportOrder).filter(
-        models.ExportOrder.batch_id == batch.id,
-        models.ExportOrder.id != order.id
-    ).all()
-
-    same_combo_batches = db.query(models.VehicleBatch).filter(
-        and_(
-            models.VehicleBatch.formula_id == batch.formula_id,
-            models.VehicleBatch.spray_line_id == batch.spray_line_id
-        ),
-        models.VehicleBatch.id != batch.id
-    ).limit(20).all()
-
-    same_combo_orders = []
-    for scb in same_combo_batches:
-        sc_orders = db.query(models.ExportOrder).filter(
-            models.ExportOrder.batch_id == scb.id
-        ).all()
-        same_combo_orders.extend(sc_orders)
+    same_combo_ref = trace_rules.get_same_combo_reference(
+        db, chain.formula.id, chain.spray_line.id, exclude_batch_id=chain.batch.id, batch_limit=20
+    )
 
     return schemas.TraceResult(
-        order=schemas.ExportOrder.model_validate(order),
-        batch=schemas.VehicleBatch.model_validate(batch),
-        formula=schemas.CoatingFormula.model_validate(formula),
-        spray_line=schemas.SprayLine.model_validate(spray_line),
-        climate=schemas.DestinationClimate.model_validate(climate),
-        inspections=[schemas.InspectionRecord.model_validate(i) for i in inspections],
-        marks=[schemas.BatchMark.model_validate(m) for m in marks],
-        complaints=[schemas.CustomerComplaint.model_validate(c) for c in complaints],
+        order=schemas.ExportOrder.model_validate(chain.order),
+        batch=schemas.VehicleBatch.model_validate(chain.batch),
+        formula=schemas.CoatingFormula.model_validate(chain.formula),
+        spray_line=schemas.SprayLine.model_validate(chain.spray_line),
+        climate=schemas.DestinationClimate.model_validate(chain.climate),
+        inspections=[schemas.InspectionRecord.model_validate(i) for i in chain.inspections],
+        marks=[schemas.BatchMark.model_validate(m) for m in chain.marks],
+        complaints=[schemas.CustomerComplaint.model_validate(c) for c in chain.complaints],
         direct_same_batch_orders=[schemas.ExportOrder.model_validate(o) for o in direct_same_batch_orders],
         reference_same_combo=schemas.ReferenceSameCombo(
-            batches=[schemas.VehicleBatch.model_validate(b) for b in same_combo_batches],
-            orders=[schemas.ExportOrder.model_validate(o) for o in same_combo_orders]
+            batches=[schemas.VehicleBatch.model_validate(b) for b in same_combo_ref.batches],
+            orders=[schemas.ExportOrder.model_validate(o) for o in same_combo_ref.orders]
         )
     )
 
@@ -240,80 +221,33 @@ def trace_by_batch(db: Session, batch_id: int):
     return None
 
 
-def _get_route_climate_info(db: Session, shipping_route: str):
-    orders_on_route = db.query(models.ExportOrder).filter(
-        models.ExportOrder.shipping_route == shipping_route
-    ).all()
-    if not orders_on_route:
-        return None, None, None
-    climate = db.query(models.DestinationClimate).filter(
-        models.DestinationClimate.id == orders_on_route[0].climate_id
-    ).first()
-    if climate:
-        return climate.climate_zone, climate.avg_high_temp_c, climate.avg_relative_humidity_pct
-    return None, None, None
-
-
 def analyze_formula_risks(db: Session):
     results = []
     formulas = get_formulas(db, limit=1000)
 
     for formula in formulas:
-        batches = db.query(models.VehicleBatch).filter(
-            models.VehicleBatch.formula_id == formula.id
-        ).all()
-
-        total_orders = 0
-        total_complaints = 0
-        bubbling_complaints = 0
-        route_data = {}
-
-        for batch in batches:
-            orders = db.query(models.ExportOrder).filter(
-                models.ExportOrder.batch_id == batch.id
-            ).all()
-            total_orders += len(orders)
-
-            for order in orders:
-                route = order.shipping_route
-                if route not in route_data:
-                    route_data[route] = {"orders": 0, "complaints": 0, "bubbling": 0}
-                route_data[route]["orders"] += 1
-
-                complaints = db.query(models.CustomerComplaint).filter(
-                    models.CustomerComplaint.order_id == order.id
-                ).all()
-                total_complaints += len(complaints)
-                route_data[route]["complaints"] += len(complaints)
-                for c in complaints:
-                    if c.complaint_type == models.ComplaintType.BUBBLING:
-                        bubbling_complaints += 1
-                        route_data[route]["bubbling"] += 1
-
-        complaint_rate = (total_complaints / total_orders * 100) if total_orders > 0 else 0.0
-        bubbling_rate = (bubbling_complaints / total_orders * 100) if total_orders > 0 else 0.0
+        stats = trace_rules.aggregate_by_formula(db, formula.id)
+        route_stats = trace_rules.aggregate_by_formula_routes(db, formula.id)
 
         high_risk_routes = [
-            route for route, data in route_data.items()
-            if data["complaints"] >= 1 and (data["complaints"] / data["orders"] * 100) >= 20.0
+            route for route, data in route_stats.items()
+            if trace_rules.is_high_risk_complaint_rate(data.complaint_rate, min_complaints=data.total_complaints)
         ]
         high_risk_routes.sort(
-            key=lambda r: route_data[r]["complaints"] / route_data[r]["orders"] if route_data[r]["orders"] > 0 else 0,
+            key=lambda r: route_stats[r].complaint_rate if route_stats[r].total_orders > 0 else 0,
             reverse=True
         )
 
         route_details = []
-        for route, data in route_data.items():
-            rc_rate = (data["complaints"] / data["orders"] * 100) if data["orders"] > 0 else 0.0
-            rb_rate = (data["bubbling"] / data["orders"] * 100) if data["orders"] > 0 else 0.0
-            cz, avg_t, avg_h = _get_route_climate_info(db, route)
+        for route, data in route_stats.items():
+            cz, avg_t, avg_h = trace_rules.get_route_climate_info(db, route)
             route_details.append(schemas.RouteComplaintDetail(
                 shipping_route=route,
-                route_orders=data["orders"],
-                route_complaints=data["complaints"],
-                complaint_rate=round(rc_rate, 2),
-                bubbling_complaints=data["bubbling"],
-                bubbling_rate=round(rb_rate, 2),
+                route_orders=data.total_orders,
+                route_complaints=data.total_complaints,
+                complaint_rate=data.complaint_rate,
+                bubbling_complaints=data.bubbling_complaints,
+                bubbling_rate=data.bubbling_rate,
                 climate_zone=cz,
                 avg_high_temp_c=avg_t,
                 avg_relative_humidity_pct=avg_h
@@ -324,11 +258,11 @@ def analyze_formula_risks(db: Session):
             formula_id=formula.id,
             formula_code=formula.code,
             formula_name=formula.name,
-            total_orders=total_orders,
-            total_complaints=total_complaints,
-            bubbling_complaints=bubbling_complaints,
-            complaint_rate=round(complaint_rate, 2),
-            bubbling_rate=round(bubbling_rate, 2),
+            total_orders=stats.total_orders,
+            total_complaints=stats.total_complaints,
+            bubbling_complaints=stats.bubbling_complaints,
+            complaint_rate=stats.complaint_rate,
+            bubbling_rate=stats.bubbling_rate,
             high_risk_routes=high_risk_routes[:5],
             route_details=route_details
         ))
@@ -339,52 +273,30 @@ def analyze_formula_risks(db: Session):
 
 def analyze_formula_route_risks(db: Session, min_orders: int = 1):
     results = []
-    formulas = get_formulas(db, limit=1000)
+    all_stats = trace_rules.aggregate_all_formulas_routes(db)
+    formulas = {f.id: f for f in get_formulas(db, limit=1000)}
 
-    for formula in formulas:
-        batches = db.query(models.VehicleBatch).filter(
-            models.VehicleBatch.formula_id == formula.id
-        ).all()
-
-        route_data = {}
-        for batch in batches:
-            orders = db.query(models.ExportOrder).filter(
-                models.ExportOrder.batch_id == batch.id
-            ).all()
-            for order in orders:
-                route = order.shipping_route
-                if route not in route_data:
-                    route_data[route] = {"orders": 0, "complaints": 0, "bubbling": 0}
-                route_data[route]["orders"] += 1
-
-                complaints = db.query(models.CustomerComplaint).filter(
-                    models.CustomerComplaint.order_id == order.id
-                ).all()
-                route_data[route]["complaints"] += len(complaints)
-                for c in complaints:
-                    if c.complaint_type == models.ComplaintType.BUBBLING:
-                        route_data[route]["bubbling"] += 1
-
-        for route, data in route_data.items():
-            if data["orders"] < min_orders:
-                continue
-            rc_rate = (data["complaints"] / data["orders"] * 100) if data["orders"] > 0 else 0.0
-            rb_rate = (data["bubbling"] / data["orders"] * 100) if data["orders"] > 0 else 0.0
-            cz, avg_t, avg_h = _get_route_climate_info(db, route)
-            results.append(schemas.FormulaRouteRisk(
-                formula_id=formula.id,
-                formula_code=formula.code,
-                formula_name=formula.name,
-                shipping_route=route,
-                route_orders=data["orders"],
-                route_complaints=data["complaints"],
-                complaint_rate=round(rc_rate, 2),
-                bubbling_complaints=data["bubbling"],
-                bubbling_rate=round(rb_rate, 2),
-                climate_zone=cz,
-                avg_high_temp_c=avg_t,
-                avg_relative_humidity_pct=avg_h
-            ))
+    for (formula_id, shipping_route), data in all_stats.items():
+        if data.total_orders < min_orders:
+            continue
+        formula = formulas.get(formula_id)
+        if not formula:
+            continue
+        cz, avg_t, avg_h = trace_rules.get_route_climate_info(db, shipping_route)
+        results.append(schemas.FormulaRouteRisk(
+            formula_id=formula.id,
+            formula_code=formula.code,
+            formula_name=formula.name,
+            shipping_route=shipping_route,
+            route_orders=data.total_orders,
+            route_complaints=data.total_complaints,
+            complaint_rate=data.complaint_rate,
+            bubbling_complaints=data.bubbling_complaints,
+            bubbling_rate=data.bubbling_rate,
+            climate_zone=cz,
+            avg_high_temp_c=avg_t,
+            avg_relative_humidity_pct=avg_h
+        ))
 
     results.sort(key=lambda x: x.complaint_rate, reverse=True)
     return results
@@ -400,41 +312,30 @@ def get_formula_route_trace(db: Session, formula_id: int, shipping_route: str):
     ).all()
 
     route_orders = []
-    route_complaints_total = 0
-    route_bubbling_total = 0
-    all_complaint_types = []
-
     for batch in batches:
         orders = db.query(models.ExportOrder).filter(
             models.ExportOrder.batch_id == batch.id,
             models.ExportOrder.shipping_route == shipping_route
         ).all()
         for order in orders:
-            complaints = db.query(models.CustomerComplaint).filter(
-                models.CustomerComplaint.order_id == order.id
-            ).all()
-            route_complaints_total += len(complaints)
-            for c in complaints:
-                if c.complaint_type == models.ComplaintType.BUBBLING:
-                    route_bubbling_total += 1
-                all_complaint_types.append(c.complaint_type.value)
+            complaints = get_complaints_by_order(db, order.id)
             route_orders.append((order, batch, complaints))
 
-    route_order_count = len(route_orders)
-    rc_rate = (route_complaints_total / route_order_count * 100) if route_order_count > 0 else 0.0
-    rb_rate = (route_bubbling_total / route_order_count * 100) if route_order_count > 0 else 0.0
-    cz, avg_t, avg_h = _get_route_climate_info(db, shipping_route)
+    stats = trace_rules.ComplaintStats(total_orders=len(route_orders))
+    all_complaint_types = []
+    for _, _, complaints in route_orders:
+        stats.total_complaints += len(complaints)
+        for c in complaints:
+            if c.complaint_type == models.ComplaintType.BUBBLING:
+                stats.bubbling_complaints += 1
+            all_complaint_types.append(c.complaint_type.value)
+
+    cz, avg_t, avg_h = trace_rules.get_route_climate_info(db, shipping_route)
 
     batch_summaries = []
     for order, batch, complaints in route_orders:
-        mark = db.query(models.BatchMark).filter(
-            models.BatchMark.batch_id == batch.id
-        ).order_by(models.BatchMark.marked_at.desc()).first()
-
-        inspection = db.query(models.InspectionRecord).filter(
-            models.InspectionRecord.batch_id == batch.id
-        ).order_by(models.InspectionRecord.inspection_date.desc()).first()
-
+        mark = trace_rules.get_latest_batch_mark(db, batch.id)
+        inspection = trace_rules.get_latest_inspection(db, batch.id)
         complaint_types = list(set(c.complaint_type.value for c in complaints))
 
         batch_summaries.append(schemas.BatchInspectionSummary(
@@ -461,11 +362,11 @@ def get_formula_route_trace(db: Session, formula_id: int, shipping_route: str):
         formula_code=formula.code,
         formula_name=formula.name,
         shipping_route=shipping_route,
-        route_orders=route_order_count,
-        route_complaints=route_complaints_total,
-        complaint_rate=round(rc_rate, 2),
-        bubbling_complaints=route_bubbling_total,
-        bubbling_rate=round(rb_rate, 2),
+        route_orders=stats.total_orders,
+        route_complaints=stats.total_complaints,
+        complaint_rate=stats.complaint_rate,
+        bubbling_complaints=stats.bubbling_complaints,
+        bubbling_rate=stats.bubbling_rate,
         climate_zone=cz,
         avg_high_temp_c=avg_t,
         avg_relative_humidity_pct=avg_h,
@@ -519,56 +420,27 @@ def get_reinspection_detail(db: Session, reinspection_id: int):
     if not db_reinspection:
         return None
 
-    order = get_order(db, db_reinspection.order_id)
-    batch = get_batch(db, order.batch_id) if order else None
-    formula = get_formula(db, batch.formula_id) if batch else None
-    spray_line = get_spray_line(db, batch.spray_line_id) if batch else None
-    climate = get_climate(db, order.climate_id) if order else None
-    inspections = get_inspections_by_batch(db, batch.id) if batch else []
-    marks = get_marks_by_batch(db, batch.id) if batch else []
-    complaints = get_complaints_by_order(db, order.id) if order else []
+    chain = trace_rules.build_order_trace_chain(db, db_reinspection.order_id)
+    order = chain.order if chain else None
+    batch = chain.batch if chain else None
+    formula = chain.formula if chain else None
+    spray_line = chain.spray_line if chain else None
+    climate = chain.climate if chain else None
+    inspections = chain.inspections if chain else []
+    marks = chain.marks if chain else []
+    complaints = chain.complaints if chain else []
 
     reference_summary = None
     if batch and formula and spray_line:
-        same_combo_batches = db.query(models.VehicleBatch).filter(
-            and_(
-                models.VehicleBatch.formula_id == batch.formula_id,
-                models.VehicleBatch.spray_line_id == batch.spray_line_id
-            ),
-            models.VehicleBatch.id != batch.id
-        ).all()
-
-        same_combo_order_count = 0
-        same_combo_complaint_count = 0
-        same_combo_bubbling_count = 0
-        same_combo_marked_codes = []
-
-        for scb in same_combo_batches:
-            sc_orders = db.query(models.ExportOrder).filter(
-                models.ExportOrder.batch_id == scb.id
-            ).all()
-            same_combo_order_count += len(sc_orders)
-            for sco in sc_orders:
-                sc_complaints = db.query(models.CustomerComplaint).filter(
-                    models.CustomerComplaint.order_id == sco.id
-                ).all()
-                same_combo_complaint_count += len(sc_complaints)
-                for scc in sc_complaints:
-                    if scc.complaint_type == models.ComplaintType.BUBBLING:
-                        same_combo_bubbling_count += 1
-
-            sc_marks = db.query(models.BatchMark).filter(
-                models.BatchMark.batch_id == scb.id
-            ).all()
-            if sc_marks:
-                same_combo_marked_codes.append(scb.batch_code)
-
+        same_combo_ref = trace_rules.get_same_combo_reference(
+            db, formula.id, spray_line.id, exclude_batch_id=batch.id
+        )
         reference_summary = schemas.ReferenceSummary(
-            same_combo_batch_count=len(same_combo_batches),
-            same_combo_order_count=same_combo_order_count,
-            same_combo_complaint_count=same_combo_complaint_count,
-            same_combo_bubbling_count=same_combo_bubbling_count,
-            same_combo_marked_batches=same_combo_marked_codes
+            same_combo_batch_count=len(same_combo_ref.batches),
+            same_combo_order_count=same_combo_ref.order_count,
+            same_combo_complaint_count=same_combo_ref.complaint_count,
+            same_combo_bubbling_count=same_combo_ref.bubbling_count,
+            same_combo_marked_batches=same_combo_ref.marked_batch_codes
         )
 
     return schemas.ReinspectionOrderDetail(
@@ -603,32 +475,12 @@ def _calc_formula_risk_score(db: Session, formula_id: int) -> tuple:
     if not formula:
         return 0.0, []
 
-    batches = db.query(models.VehicleBatch).filter(
-        models.VehicleBatch.formula_id == formula_id
-    ).all()
-
-    total_orders = 0
-    total_complaints = 0
-    bubbling_complaints = 0
+    stats = trace_rules.aggregate_by_formula(db, formula_id)
+    score = 0.0
     reasons = []
 
-    for batch in batches:
-        orders = db.query(models.ExportOrder).filter(
-            models.ExportOrder.batch_id == batch.id
-        ).all()
-        total_orders += len(orders)
-        for order in orders:
-            complaints = db.query(models.CustomerComplaint).filter(
-                models.CustomerComplaint.order_id == order.id
-            ).all()
-            total_complaints += len(complaints)
-            for c in complaints:
-                if c.complaint_type == models.ComplaintType.BUBBLING:
-                    bubbling_complaints += 1
-
-    score = 0.0
-    complaint_rate = (total_complaints / total_orders * 100) if total_orders > 0 else 0.0
-    bubbling_rate = (bubbling_complaints / total_orders * 100) if total_orders > 0 else 0.0
+    complaint_rate = stats.complaint_rate
+    bubbling_rate = stats.bubbling_rate
 
     if complaint_rate >= 30:
         score += 40.0
@@ -650,13 +502,7 @@ def _calc_formula_risk_score(db: Session, formula_id: int) -> tuple:
         score += 8.0
         reasons.append(f"起泡率{bubbling_rate:.1f}%(>=3%)")
 
-    recent_cutoff = datetime.now() - timedelta(days=90)
-    recent_complaints = db.query(models.CustomerComplaint).join(models.ExportOrder).join(
-        models.VehicleBatch
-    ).filter(
-        models.VehicleBatch.formula_id == formula_id,
-        models.CustomerComplaint.reported_at >= recent_cutoff
-    ).count()
+    recent_complaints = trace_rules.count_recent_complaints_by_formula(db, formula_id, days=90)
     if recent_complaints >= 3:
         score += 25.0
         reasons.append(f"近90天投诉{recent_complaints}起(>=3)")
@@ -672,37 +518,11 @@ def _calc_spray_line_risk_score(db: Session, spray_line_id: int) -> tuple:
     if not spray_line:
         return 0.0, []
 
-    batches = db.query(models.VehicleBatch).filter(
-        models.VehicleBatch.spray_line_id == spray_line_id
-    ).all()
-
-    total_orders = 0
-    total_complaints = 0
-    reasons = []
-    failed_inspection_count = 0
-    total_inspection_count = 0
-
-    for batch in batches:
-        orders = db.query(models.ExportOrder).filter(
-            models.ExportOrder.batch_id == batch.id
-        ).all()
-        total_orders += len(orders)
-        for order in orders:
-            complaints = db.query(models.CustomerComplaint).filter(
-                models.CustomerComplaint.order_id == order.id
-            ).all()
-            total_complaints += len(complaints)
-
-        inspections = db.query(models.InspectionRecord).filter(
-            models.InspectionRecord.batch_id == batch.id
-        ).all()
-        total_inspection_count += len(inspections)
-        for insp in inspections:
-            if insp.failed > 0:
-                failed_inspection_count += 1
-
+    stats, total_inspection_count, failed_inspection_count = trace_rules.aggregate_by_spray_line(db, spray_line_id)
     score = 0.0
-    complaint_rate = (total_complaints / total_orders * 100) if total_orders > 0 else 0.0
+    reasons = []
+
+    complaint_rate = stats.complaint_rate
 
     if complaint_rate >= 25:
         score += 35.0
@@ -714,7 +534,7 @@ def _calc_spray_line_risk_score(db: Session, spray_line_id: int) -> tuple:
         score += 8.0
         reasons.append(f"喷涂线投诉率{complaint_rate:.1f}%(>=3%)")
 
-    fail_rate = (failed_inspection_count / total_inspection_count * 100) if total_inspection_count > 0 else 0.0
+    fail_rate = trace_rules._calc_rate(failed_inspection_count, total_inspection_count)
     if fail_rate >= 50:
         score += 35.0
         reasons.append(f"质检不合格批次率{fail_rate:.1f}%过高(>=50%)")
@@ -725,18 +545,7 @@ def _calc_spray_line_risk_score(db: Session, spray_line_id: int) -> tuple:
         score += 8.0
         reasons.append(f"存在质检不合格批次")
 
-    recent_cutoff = datetime.now() - timedelta(days=90)
-    recent_batches = db.query(models.VehicleBatch).filter(
-        models.VehicleBatch.spray_line_id == spray_line_id,
-        models.VehicleBatch.production_date >= recent_cutoff
-    ).all()
-    recent_failed = 0
-    for batch in recent_batches:
-        insp = db.query(models.InspectionRecord).filter(
-            models.InspectionRecord.batch_id == batch.id
-        ).order_by(models.InspectionRecord.inspection_date.desc()).first()
-        if insp and insp.failed > 0:
-            recent_failed += 1
+    recent_failed = trace_rules.count_recent_failed_batches_by_spray_line(db, spray_line_id, days=90)
     if recent_failed >= 2:
         score += 30.0
         reasons.append(f"近90天{recent_failed}批次质检有不合格(>=2)")
@@ -774,17 +583,9 @@ def _calc_climate_risk_score(db: Session, climate_id: int) -> tuple:
         score += 15.0
         reasons.append(f"气候区为{climate.climate_zone}(热带)")
 
-    orders_on_route = db.query(models.ExportOrder).filter(
-        models.ExportOrder.climate_id == climate_id
-    ).all()
-    route_complaints = 0
-    for order in orders_on_route:
-        complaints = db.query(models.CustomerComplaint).filter(
-            models.CustomerComplaint.order_id == order.id
-        ).all()
-        route_complaints += len(complaints)
+    stats = trace_rules.aggregate_by_climate(db, climate_id)
+    route_complaint_rate = stats.complaint_rate
 
-    route_complaint_rate = (route_complaints / len(orders_on_route) * 100) if orders_on_route else 0.0
     if route_complaint_rate >= 30:
         score += 25.0
         reasons.append(f"该目的港投诉率{route_complaint_rate:.1f}%过高(>=30%)")
@@ -802,65 +603,38 @@ def _calc_complaint_risk_score(db: Session, order_id: int, formula_id: int, spra
     score = 0.0
     reasons = []
 
-    recent_cutoff = datetime.now() - timedelta(days=60)
-    recent_formula_complaints = db.query(models.CustomerComplaint).join(models.ExportOrder).join(
-        models.VehicleBatch
-    ).filter(
-        models.VehicleBatch.formula_id == formula_id,
-        models.CustomerComplaint.reported_at >= recent_cutoff
-    ).all()
+    recent_formula_complaints = trace_rules.count_recent_complaints_by_formula(db, formula_id, days=60)
 
-    if len(recent_formula_complaints) >= 3:
+    if recent_formula_complaints >= 3:
         score += 25.0
-        reasons.append(f"同配方近60天投诉{len(recent_formula_complaints)}起(>=3)")
-    elif len(recent_formula_complaints) >= 1:
+        reasons.append(f"同配方近60天投诉{recent_formula_complaints}起(>=3)")
+    elif recent_formula_complaints >= 1:
         score += 10.0
-        reasons.append(f"同配方近60天投诉{len(recent_formula_complaints)}起")
+        reasons.append(f"同配方近60天投诉{recent_formula_complaints}起")
 
-    recent_line_complaints = db.query(models.CustomerComplaint).join(models.ExportOrder).join(
-        models.VehicleBatch
-    ).filter(
-        models.VehicleBatch.spray_line_id == spray_line_id,
-        models.CustomerComplaint.reported_at >= recent_cutoff
-    ).all()
+    recent_line_complaints = trace_rules.count_recent_complaints_by_spray_line(db, spray_line_id, days=60)
 
-    if len(recent_line_complaints) >= 3:
+    if recent_line_complaints >= 3:
         score += 25.0
-        reasons.append(f"同喷涂线近60天投诉{len(recent_line_complaints)}起(>=3)")
-    elif len(recent_line_complaints) >= 1:
+        reasons.append(f"同喷涂线近60天投诉{recent_line_complaints}起(>=3)")
+    elif recent_line_complaints >= 1:
         score += 10.0
-        reasons.append(f"同喷涂线近60天投诉{len(recent_line_complaints)}起")
+        reasons.append(f"同喷涂线近60天投诉{recent_line_complaints}起")
 
-    recent_climate_complaints = db.query(models.CustomerComplaint).join(models.ExportOrder).filter(
-        models.ExportOrder.climate_id == climate_id,
-        models.CustomerComplaint.reported_at >= recent_cutoff
-    ).all()
+    recent_climate_complaints = trace_rules.count_recent_complaints_by_climate(db, climate_id, days=60)
 
-    if len(recent_climate_complaints) >= 2:
+    if recent_climate_complaints >= 2:
         score += 20.0
-        reasons.append(f"同目的港近60天投诉{len(recent_climate_complaints)}起(>=2)")
-    elif len(recent_climate_complaints) >= 1:
+        reasons.append(f"同目的港近60天投诉{recent_climate_complaints}起(>=2)")
+    elif recent_climate_complaints >= 1:
         score += 8.0
-        reasons.append(f"同目的港近60天投诉{len(recent_climate_complaints)}起")
+        reasons.append(f"同目的港近60天投诉{recent_climate_complaints}起")
 
-    same_formula_line_batches = db.query(models.VehicleBatch).filter(
-        models.VehicleBatch.formula_id == formula_id,
-        models.VehicleBatch.spray_line_id == spray_line_id
-    ).all()
-    same_combo_complaints = 0
-    for batch in same_formula_line_batches:
-        batch_orders = db.query(models.ExportOrder).filter(
-            models.ExportOrder.batch_id == batch.id
-        ).all()
-        for order in batch_orders:
-            complaints = db.query(models.CustomerComplaint).filter(
-                models.CustomerComplaint.order_id == order.id
-            ).all()
-            same_combo_complaints += len(complaints)
+    same_combo_ref = trace_rules.get_same_combo_reference(db, formula_id, spray_line_id)
 
-    if same_combo_complaints >= 2:
+    if same_combo_ref.complaint_count >= 2:
         score += 30.0
-        reasons.append(f"同配方+同喷涂线组合投诉{same_combo_complaints}起(>=2)")
+        reasons.append(f"同配方+同喷涂线组合投诉{same_combo_ref.complaint_count}起(>=2)")
 
     return min(score, 100.0), reasons
 
