@@ -214,6 +214,11 @@ class CustomerComplaint(CustomerComplaintBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ReferenceSameCombo(BaseModel):
+    batches: List[VehicleBatch] = []
+    orders: List[ExportOrder] = []
+
+
 class TraceResult(BaseModel):
     order: ExportOrder
     batch: VehicleBatch
@@ -222,8 +227,9 @@ class TraceResult(BaseModel):
     climate: DestinationClimate
     inspections: List[InspectionRecord]
     marks: List[BatchMark]
-    related_batches: List[VehicleBatch]
-    related_orders: List[ExportOrder]
+    complaints: List[CustomerComplaint]
+    direct_same_batch_orders: List[ExportOrder]
+    reference_same_combo: ReferenceSameCombo
 
 
 class RouteComplaintDetail(BaseModel):
@@ -333,6 +339,14 @@ class ReinspectionOrder(ReinspectionOrderBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ReferenceSummary(BaseModel):
+    same_combo_batch_count: int = 0
+    same_combo_order_count: int = 0
+    same_combo_complaint_count: int = 0
+    same_combo_bubbling_count: int = 0
+    same_combo_marked_batches: List[str] = []
+
+
 class ReinspectionOrderDetail(ReinspectionOrder):
     order: Optional[ExportOrder] = None
     batch: Optional[VehicleBatch] = None
@@ -342,6 +356,7 @@ class ReinspectionOrderDetail(ReinspectionOrder):
     inspections: List[InspectionRecord] = []
     marks: List[BatchMark] = []
     complaints: List[CustomerComplaint] = []
+    reference_summary: Optional[ReferenceSummary] = None
 
 
 class PreDepartureWarningItem(BaseModel):

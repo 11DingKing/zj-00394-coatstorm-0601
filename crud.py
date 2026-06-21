@@ -190,18 +190,27 @@ def trace_by_order(db: Session, order_id: int):
     climate = get_climate(db, order.climate_id)
     inspections = get_inspections_by_batch(db, batch.id)
     marks = get_marks_by_batch(db, batch.id)
+    complaints = get_complaints_by_order(db, order.id)
 
-    related_batches = db.query(models.VehicleBatch).filter(
-        or_(
+    direct_same_batch_orders = db.query(models.ExportOrder).filter(
+        models.ExportOrder.batch_id == batch.id,
+        models.ExportOrder.id != order.id
+    ).all()
+
+    same_combo_batches = db.query(models.VehicleBatch).filter(
+        and_(
             models.VehicleBatch.formula_id == batch.formula_id,
             models.VehicleBatch.spray_line_id == batch.spray_line_id
-        )
-    ).filter(models.VehicleBatch.id != batch.id).limit(20).all()
+        ),
+        models.VehicleBatch.id != batch.id
+    ).limit(20).all()
 
-    related_orders = []
-    for rb in related_batches:
-        orders = db.query(models.ExportOrder).filter(models.ExportOrder.batch_id == rb.id).all()
-        related_orders.extend(orders)
+    same_combo_orders = []
+    for scb in same_combo_batches:
+        sc_orders = db.query(models.ExportOrder).filter(
+            models.ExportOrder.batch_id == scb.id
+        ).all()
+        same_combo_orders.extend(sc_orders)
 
     return schemas.TraceResult(
         order=schemas.ExportOrder.model_validate(order),
@@ -211,8 +220,12 @@ def trace_by_order(db: Session, order_id: int):
         climate=schemas.DestinationClimate.model_validate(climate),
         inspections=[schemas.InspectionRecord.model_validate(i) for i in inspections],
         marks=[schemas.BatchMark.model_validate(m) for m in marks],
-        related_batches=[schemas.VehicleBatch.model_validate(rb) for rb in related_batches],
-        related_orders=[schemas.ExportOrder.model_validate(ro) for ro in related_orders]
+        complaints=[schemas.CustomerComplaint.model_validate(c) for c in complaints],
+        direct_same_batch_orders=[schemas.ExportOrder.model_validate(o) for o in direct_same_batch_orders],
+        reference_same_combo=schemas.ReferenceSameCombo(
+            batches=[schemas.VehicleBatch.model_validate(b) for b in same_combo_batches],
+            orders=[schemas.ExportOrder.model_validate(o) for o in same_combo_orders]
+        )
     )
 
 
@@ -515,6 +528,49 @@ def get_reinspection_detail(db: Session, reinspection_id: int):
     marks = get_marks_by_batch(db, batch.id) if batch else []
     complaints = get_complaints_by_order(db, order.id) if order else []
 
+    reference_summary = None
+    if batch and formula and spray_line:
+        same_combo_batches = db.query(models.VehicleBatch).filter(
+            and_(
+                models.VehicleBatch.formula_id == batch.formula_id,
+                models.VehicleBatch.spray_line_id == batch.spray_line_id
+            ),
+            models.VehicleBatch.id != batch.id
+        ).all()
+
+        same_combo_order_count = 0
+        same_combo_complaint_count = 0
+        same_combo_bubbling_count = 0
+        same_combo_marked_codes = []
+
+        for scb in same_combo_batches:
+            sc_orders = db.query(models.ExportOrder).filter(
+                models.ExportOrder.batch_id == scb.id
+            ).all()
+            same_combo_order_count += len(sc_orders)
+            for sco in sc_orders:
+                sc_complaints = db.query(models.CustomerComplaint).filter(
+                    models.CustomerComplaint.order_id == sco.id
+                ).all()
+                same_combo_complaint_count += len(sc_complaints)
+                for scc in sc_complaints:
+                    if scc.complaint_type == models.ComplaintType.BUBBLING:
+                        same_combo_bubbling_count += 1
+
+            sc_marks = db.query(models.BatchMark).filter(
+                models.BatchMark.batch_id == scb.id
+            ).all()
+            if sc_marks:
+                same_combo_marked_codes.append(scb.batch_code)
+
+        reference_summary = schemas.ReferenceSummary(
+            same_combo_batch_count=len(same_combo_batches),
+            same_combo_order_count=same_combo_order_count,
+            same_combo_complaint_count=same_combo_complaint_count,
+            same_combo_bubbling_count=same_combo_bubbling_count,
+            same_combo_marked_batches=same_combo_marked_codes
+        )
+
     return schemas.ReinspectionOrderDetail(
         id=db_reinspection.id,
         order_id=db_reinspection.order_id,
@@ -538,6 +594,7 @@ def get_reinspection_detail(db: Session, reinspection_id: int):
         inspections=[schemas.InspectionRecord.model_validate(i) for i in inspections],
         marks=[schemas.BatchMark.model_validate(m) for m in marks],
         complaints=[schemas.CustomerComplaint.model_validate(c) for c in complaints],
+        reference_summary=reference_summary
     )
 
 
