@@ -214,3 +214,30 @@ def trace_batch(batch_id: int, db: Session = Depends(get_db)):
 @app.get("/analytics/formula-risks/", response_model=List[schemas.FormulaRisk])
 def get_formula_risks(db: Session = Depends(get_db)):
     return crud.analyze_formula_risks(db)
+
+
+@app.get("/analytics/formula-route-risks/", response_model=List[schemas.FormulaRouteRisk])
+def get_formula_route_risks(
+    min_orders: int = 1,
+    formula_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    results = crud.analyze_formula_route_risks(db, min_orders=min_orders)
+    if formula_id is not None:
+        results = [r for r in results if r.formula_id == formula_id]
+    return results
+
+
+@app.get(
+    "/analytics/formula-route-risks/{formula_id}/{shipping_route:path}",
+    response_model=schemas.FormulaRouteRiskDetail
+)
+def get_formula_route_trace(
+    formula_id: int,
+    shipping_route: str,
+    db: Session = Depends(get_db)
+):
+    result = crud.get_formula_route_trace(db, formula_id=formula_id, shipping_route=shipping_route)
+    if result is None:
+        raise HTTPException(status_code=404, detail="配方或线路组合不存在")
+    return result

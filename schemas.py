@@ -213,6 +213,18 @@ class TraceResult(BaseModel):
     related_orders: List[ExportOrder]
 
 
+class RouteComplaintDetail(BaseModel):
+    shipping_route: str
+    route_orders: int
+    route_complaints: int
+    complaint_rate: float
+    bubbling_complaints: int
+    bubbling_rate: float
+    climate_zone: Optional[str] = None
+    avg_high_temp_c: Optional[float] = None
+    avg_relative_humidity_pct: Optional[float] = None
+
+
 class FormulaRisk(BaseModel):
     formula_id: int
     formula_code: str
@@ -223,3 +235,54 @@ class FormulaRisk(BaseModel):
     complaint_rate: float
     bubbling_rate: float
     high_risk_routes: List[str]
+    route_details: List[RouteComplaintDetail] = []
+
+
+class FormulaRouteRisk(BaseModel):
+    formula_id: int
+    formula_code: str
+    formula_name: str
+    shipping_route: str
+    route_orders: int
+    route_complaints: int
+    complaint_rate: float
+    bubbling_complaints: int
+    bubbling_rate: float
+    climate_zone: Optional[str] = None
+    avg_high_temp_c: Optional[float] = None
+    avg_relative_humidity_pct: Optional[float] = None
+
+
+class BatchInspectionSummary(BaseModel):
+    batch_id: int
+    batch_code: str
+    model: str
+    quantity: int
+    production_date: datetime
+    order_no: str
+    customer: str
+    mark_status: Optional[str] = None
+    mark_reason: Optional[str] = None
+    adhesion_grade: Optional[str] = None
+    color_delta_e: Optional[float] = None
+    film_thickness_um: Optional[float] = None
+    humidity_resistance_hours: Optional[float] = None
+    inspection_passed: Optional[int] = None
+    inspection_failed: Optional[int] = None
+    complaint_types: List[str] = []
+
+
+class FormulaRouteRiskDetail(BaseModel):
+    formula_id: int
+    formula_code: str
+    formula_name: str
+    shipping_route: str
+    route_orders: int
+    route_complaints: int
+    complaint_rate: float
+    bubbling_complaints: int
+    bubbling_rate: float
+    climate_zone: Optional[str] = None
+    avg_high_temp_c: Optional[float] = None
+    avg_relative_humidity_pct: Optional[float] = None
+    related_batches: List[BatchInspectionSummary]
